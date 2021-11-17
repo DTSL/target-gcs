@@ -133,7 +133,7 @@ def persist_lines(config, lines):
                 raise Exception("key_properties field is required")
             key_properties[stream] = o["key_properties"]
         else:
-            raise Exception(
+            logger.warning(
                 "Unknown message type {} in message {}".format(o["type"], o)
             )
 
