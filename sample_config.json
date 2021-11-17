@@ -1,0 +1,6 @@
+{
+    "project_id": "my-project-id",
+    "bucket_name": "my-bucker-name",
+    "object_path": "object/path",
+    "append_timestamp_folder": true
+}

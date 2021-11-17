@@ -1,0 +1,4 @@
+singer-python~=5.12.1
+jsonschema~=2.6.0
+setuptools~=59.1.1
+google-cloud-storage==1.42.3
