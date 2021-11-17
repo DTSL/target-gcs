@@ -43,7 +43,8 @@ def _load_to_gcs(client, bucket_name, object_path, object_name, file_to_load):
 
         bucket = client.get_bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        blob.upload_from_file(file_to_load, rewind=True)
+        file_to_load.flush()
+        blob.upload_from_filename(file_to_load.name)
 
         return True
 
@@ -147,7 +148,7 @@ def persist_lines(config, lines):
             object_name=f"{stream}.json",
             file_to_load=tmp_file,
         )
-        tmp_dir.cleanup()
+    tmp_dir.cleanup()
 
     return state
 
