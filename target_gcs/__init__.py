@@ -9,6 +9,7 @@ import sys
 from datetime import datetime
 
 import tempfile
+from time import sleep
 
 import singer
 from google.cloud import storage
@@ -52,6 +53,10 @@ def _load_to_gcs(client, bucket_name, object_path, object_name, file_to_load):
             bucket = client.get_bucket(bucket_name)
             blob = bucket.blob(blob_name)
             blob.upload_from_filename(file_to_load.name)
+
+            # truncate rows from sent file
+            file_to_load.seek(0)
+            file_to_load.truncate()
 
             return True
 
@@ -155,11 +160,8 @@ def persist_lines(config, lines):
                 )
 
                 stream_config[stream]['nb_sync'] += 1
-                stream_config[stream]['tmp_file'].close()
-                stream_config[stream]['tmp_file'] = open(tempfile.NamedTemporaryFile().name, 'w+t') # open(os.path.join(tmp_dir.name, stream), "w+t")
 
-                previous_stream = o["stream"]
-
+            previous_stream = o["stream"]
             state = None
         elif t == "STATE":
             logger.debug("Setting state to {}".format(o["value"]))
@@ -189,11 +191,6 @@ def persist_lines(config, lines):
             object_name="{}_{}.json".format(stream, stream_config[stream]['nb_sync']),
             file_to_load=stream_config[stream]['tmp_file'],
         )
-
-    #sync_records(tmp_dir, stream_config, bucket_name, object_path, now, append_timestamp_folder, nb_sync)
-    #tmp_dir = tempfile.TemporaryDirectory()
-    #stream_config = dict()
-    #nb_sync += 1
 
     return state
 
