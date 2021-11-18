@@ -8,6 +8,8 @@ import os
 import sys
 from datetime import datetime
 
+import tempfile
+
 import singer
 from google.cloud import storage
 from jsonschema.validators import Draft4Validator
@@ -35,35 +37,57 @@ def flatten(d, parent_key="", sep="__"):
 
 
 def _load_to_gcs(client, bucket_name, object_path, object_name, file_to_load):
+    file_to_load.flush()
     blob_name = os.path.join(object_path, object_name)
-    logger.info("loading gs://{}/{} to GCS".format(bucket_name, blob_name))
 
-    # run load job or raise error
-    try:
+    # check if file is not empty
+    if os.stat(file_to_load.name).st_size == 0:
+        # logger.info("loading gs://{}/{} to GCS".format(bucket_name, blob_name))
+        pass
+    else:
+        logger.info("loading gs://{}/{} to GCS".format(bucket_name, blob_name))
 
-        bucket = client.get_bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        file_to_load.flush()
-        blob.upload_from_filename(file_to_load.name)
+        # run load job or raise error
+        try:
+            bucket = client.get_bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.upload_from_filename(file_to_load.name)
 
-        return True
+            return True
 
-    except Exception as err:
-        logger.error(
-            "failed to load to bucket {} from file: {}".format(bucket_name, str(err))
+        except Exception as err:
+            logger.error(
+                "failed to load to bucket {} from file: {}".format(bucket_name, str(err))
+            )
+            raise err
+
+def sync_records(tmp_dir, stream_config, bucket_name, object_path, now, append_timestamp_folder, nb_previous_stream):
+    for stream, tmp_file in stream_config.items():
+        _load_to_gcs(
+            client=storage.Client(),
+            bucket_name=bucket_name,
+            object_path=os.path.join(object_path, stream, now)
+            if append_timestamp_folder
+            else os.path.join(object_path, stream),
+            object_name=f"{stream}_{nb_previous_stream}.json",
+            file_to_load=tmp_file,
         )
-        raise err
+
+    tmp_dir.cleanup()
+
 
 
 def persist_lines(config, lines):
-    import tempfile
 
     bucket_name = config["bucket_name"]
     object_path = config.get("object_path", "")
     append_timestamp_folder = config.get("append_timestamp_folder", False)
 
-    tmp_dir = tempfile.TemporaryDirectory()
-    tmp_files = dict()
+    sync_batch = config.get("sync_batch", 1000000)
+    sync_if_stream_changes = config.get("sync_if_stream_changes", False)
+
+    stream_config = dict()
+    previous_stream = None
 
     state = None
     schemas = {}
@@ -90,32 +114,51 @@ def persist_lines(config, lines):
                 raise Exception(
                     "Line is missing required key 'stream': {}".format(line)
                 )
-            if o["stream"] not in schemas:
-                raise Exception(
-                    "A record for stream {} was encountered before a corresponding schema".format(
-                        o["stream"]
-                    )
-                )
 
-            # Get schema for this record's stream
-            schema = schemas[o["stream"]]
-
-            # Validate record
-            validators[o["stream"]].validate(o["record"])
+            if previous_stream is None:
+                previous_stream = o["stream"]
 
             # If the record needs to be flattened, uncomment this line
             flattened_record = flatten(o["record"])
 
             # create empty temp file for every new stream
-            if o["stream"] not in tmp_files:
-                tmp_files[o["stream"]] = open(
-                    os.path.join(tmp_dir.name, o["stream"]), "w+t"
-                )
+            if o["stream"] not in stream_config:
+                stream_config[o["stream"]] = {}
+                stream_config[o["stream"]]['tmp_file'] = open(tempfile.NamedTemporaryFile().name, 'w+t') # open(os.path.join(tmp_dir.name, stream), "w+t")
+                stream_config[o["stream"]]['nb_sync'] = 1
+                stream_config[o["stream"]]['nb_records'] = 0
 
             # add new row
-            tmp_file = tmp_files[o["stream"]]
-            tmp_file.write(str(flattened_record))
-            tmp_file.write("\n")
+            stream_config[o["stream"]]['tmp_file'].write(str(flattened_record))
+            stream_config[o["stream"]]['tmp_file'].write("\n")
+
+            # add nb received records
+            stream_config[o["stream"]]['nb_records'] += 1
+
+            # sync previous stream or current stream if it reach nb_records to sync
+            if stream_config[o["stream"]]['nb_records'] % sync_batch == 0 or (previous_stream != o["stream"] and sync_if_stream_changes):
+                # get stream to sync
+                stream = None
+                if stream_config[o["stream"]]['nb_records'] % sync_batch == 0:
+                    stream = o["stream"]
+                    logger.debug(f"Sync {stream} : records reached nb records to sync")
+                else:
+                    stream = previous_stream
+                    logger.debug("Sync {} records : received new stream {}".format(stream, o["stream"]))
+
+                _load_to_gcs(
+                    client=storage.Client(),
+                    bucket_name=bucket_name,
+                    object_path=os.path.join(object_path, stream, now) if append_timestamp_folder else os.path.join(object_path, stream),
+                    object_name="{}_{}.json".format(stream, stream_config[stream]['nb_sync']),
+                    file_to_load=stream_config[stream]['tmp_file'],
+                )
+
+                stream_config[stream]['nb_sync'] += 1
+                stream_config[stream]['tmp_file'].close()
+                stream_config[stream]['tmp_file'] = open(tempfile.NamedTemporaryFile().name, 'w+t') # open(os.path.join(tmp_dir.name, stream), "w+t")
+
+                previous_stream = o["stream"]
 
             state = None
         elif t == "STATE":
@@ -138,17 +181,19 @@ def persist_lines(config, lines):
                 "Unknown message type {} in message {}".format(o["type"], o)
             )
 
-    for stream, tmp_file in tmp_files.items():
+    for stream in stream_config.keys():
         _load_to_gcs(
             client=storage.Client(),
             bucket_name=bucket_name,
-            object_path=os.path.join(object_path, stream, now)
-            if append_timestamp_folder
-            else os.path.join(object_path, stream),
-            object_name=f"{stream}.json",
-            file_to_load=tmp_file,
+            object_path=os.path.join(object_path, stream, now) if append_timestamp_folder else os.path.join(object_path, stream),
+            object_name="{}_{}.json".format(stream, stream_config[stream]['nb_sync']),
+            file_to_load=stream_config[stream]['tmp_file'],
         )
-    tmp_dir.cleanup()
+
+    #sync_records(tmp_dir, stream_config, bucket_name, object_path, now, append_timestamp_folder, nb_sync)
+    #tmp_dir = tempfile.TemporaryDirectory()
+    #stream_config = dict()
+    #nb_sync += 1
 
     return state
 

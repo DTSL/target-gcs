@@ -2,5 +2,7 @@
     "project_id": "my-project-id",
     "bucket_name": "my-bucker-name",
     "object_path": "object/path",
-    "append_timestamp_folder": true
+    "append_timestamp_folder": true,
+    "sync_batch": 100,
+    "sync_if_stream_changes": true
 }
